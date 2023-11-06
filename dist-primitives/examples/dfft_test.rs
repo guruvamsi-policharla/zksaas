@@ -1,10 +1,9 @@
 use ark_bls12_377::Fr;
 use ark_ff::{FftField, PrimeField};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
-use ark_std::{end_timer, start_timer};
 use dist_primitives::{
     channel::channel::MpcSerNet,
-    dfft::dfft::{d_fft, fft_in_place_rearrange},
+    dfft::dfft::{d_fft, fft_in_place_rearrange, d_ifft},
     utils::pack::transpose,
     Opt,
 };
@@ -16,47 +15,75 @@ pub fn d_fft_test<F: FftField + PrimeField>(
     pp: &PackedSharingParams<F>,
     dom: &Radix2EvaluationDomain<F>,
 ) {
+    let mut rng = ark_std::test_rng();
     let mbyl: usize = dom.size() / pp.l;
     // We apply FFT on this vector
-    // let mut x = vec![F::ONE; cd.m];
-    let mut x: Vec<F> = Vec::new();
+    
+    let mut x_coeffs: Vec<F> = Vec::new();
     for i in 0..dom.size() {
-        x.push(F::from(i as u64));
+        x_coeffs.push(F::from(i as u64));
     }
+    let x_evals = dom.fft(&x_coeffs);
 
-    // Output to test against
-    let should_be_output = dom.fft(&x);
+    let mut x_coeff_shares = x_coeffs.clone();
+    fft_in_place_rearrange(&mut x_coeff_shares);
+    
+    let mut x_eval_shares = x_evals.clone();
+    fft_in_place_rearrange(&mut x_eval_shares);
 
-    fft_in_place_rearrange(&mut x);
+    // packed coeffs
     let mut pcoeff: Vec<Vec<F>> = Vec::new();
     for i in 0..mbyl {
-        pcoeff.push(x.iter().skip(i).step_by(mbyl).cloned().collect::<Vec<_>>());
+        pcoeff.push(x_coeff_shares.iter().skip(i).step_by(mbyl).cloned().collect::<Vec<_>>());
         pp.pack_from_public_in_place(&mut pcoeff[i]);
     }
 
     let pcoeff_share = pcoeff
         .iter()
-        .map(|x| x[Net::party_id()])
+        .map(|shares| shares[Net::party_id()])
         .collect::<Vec<_>>();
 
-    // Rearranging x
-    let myfft_timer = start_timer!(|| "Distributed FFT");
+    // packed evals
+    let mut peval: Vec<Vec<F>> = Vec::new();
+    for i in 0..mbyl {
+        peval.push(x_eval_shares.iter().skip(i).step_by(mbyl).cloned().collect::<Vec<_>>());
+        pp.pack_from_public_in_place(&mut peval[i]);
+    }
 
-    let peval_share = d_fft(pcoeff_share, false, 1, false, dom, pp);
-    end_timer!(myfft_timer);
+    let peval_share = peval
+        .iter()
+        .map(|shares| shares[Net::party_id()])
+        .collect::<Vec<_>>();
+    
+    let fft_share = d_fft(pcoeff_share, false, 1, false, dom, pp);
+    let ifft_share = d_ifft(peval_share, false, 1, false, dom, pp);
 
     // Send to king who reconstructs and checks the answer
-    Net::send_to_king(&peval_share).map(|peval_shares| {
-        let peval_shares = transpose(peval_shares);
+    Net::send_to_king(&fft_share).map(|fft_share| {
+        let fft_share = transpose(fft_share);
 
-        let mut pevals: Vec<F> = peval_shares
+        let pevals: Vec<F> = fft_share
             .into_iter()
-            .flat_map(|x| pp.unpack(&x))
+            .flat_map(|shares| pp.unpack(&shares))
             .collect();
-        pevals.reverse(); // todo: implement such that we avoid this reverse
+        // pevals.reverse(); // todo: implement such that we avoid this reverse
 
         if Net::am_king() {
-            assert_eq!(should_be_output, pevals);
+            assert_eq!(x_evals, pevals);
+        }
+    });
+
+    Net::send_to_king(&ifft_share).map(|ifft_share| {
+        let ifft_share = transpose(ifft_share);
+
+        let pcoeffs: Vec<F> = ifft_share
+            .into_iter()
+            .flat_map(|shares| pp.unpack(&shares))
+            .collect();
+        // pcoeffs.reverse(); // todo: implement such that we avoid this reverse
+
+        if Net::am_king() {
+            assert_eq!(x_coeffs, pcoeffs);
         }
     });
 }

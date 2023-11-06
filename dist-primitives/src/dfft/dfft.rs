@@ -31,9 +31,9 @@ pub fn d_fft<F: FftField + PrimeField>(
     );
 
     // Parties apply FFT1 locally
-    fft1_in_place(&mut pcoeff_share, dom, pp);
+    fft1_in_place(&mut pcoeff_share, dom, pp, dom.group_gen);
     // King applies FFT2 and parties receive shares of evals
-    fft2_with_rearrange_pad(pcoeff_share, rearrange, pad, degree2, dom, pp)
+    fft2_with_rearrange_pad(pcoeff_share, rearrange, pad, degree2, dom, pp, dom.group_gen)
 }
 
 pub fn d_ifft<F: FftField + PrimeField>(
@@ -56,9 +56,9 @@ pub fn d_ifft<F: FftField + PrimeField>(
     peval_share.iter_mut().for_each(|x| *x = *x * sizeinv);
 
     // Parties apply FFT1 locally
-    fft1_in_place(&mut peval_share, dom, pp);
+    fft1_in_place(&mut peval_share, dom, pp, dom.group_gen_inv);
     // King applies FFT2 and parties receive shares of evals
-    fft2_with_rearrange_pad(peval_share, rearrange, pad, degree2, dom, pp)
+    fft2_with_rearrange_pad(peval_share, rearrange, pad, degree2, dom, pp, dom.group_gen_inv)
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -66,6 +66,7 @@ fn fft1_in_place<F: FftField + PrimeField>(
     px: &mut Vec<F>,
     dom: &Radix2EvaluationDomain<F>,
     pp: &PackedSharingParams<F>,
+    gen: F
 ) {
     // FFT1 computation done locally on a vector of shares
     debug_assert_eq!(
@@ -83,7 +84,7 @@ fn fft1_in_place<F: FftField + PrimeField>(
     // fft1
     for i in (log2(pp.l) + 1..=log2(dom.size())).rev() {
         let poly_size = dom.size() / 2usize.pow(i);
-        let factor_stride = dom.group_gen_inv.pow(&[2usize.pow(i - 1) as u64]);
+        let factor_stride = gen.pow(&[2usize.pow(i - 1) as u64]);
         let mut factor = factor_stride;
         for k in 0..poly_size {
             for j in 0..2usize.pow(i - 1) / pp.l {
@@ -107,6 +108,7 @@ fn fft2_in_place<F: FftField + PrimeField>(
     s1: &mut Vec<F>,
     dom: &Radix2EvaluationDomain<F>,
     pp: &PackedSharingParams<F>,
+    gen: F
 ) {
     // King applies fft2, packs the vectors as desired and sends shares to parties
 
@@ -120,7 +122,7 @@ fn fft2_in_place<F: FftField + PrimeField>(
     // fft2
     for i in (1..=log2(pp.l)).rev() {
         let poly_size = dom.size() / 2usize.pow(i);
-        let factor_stride = dom.group_gen_inv.pow(&[2usize.pow(i - 1) as u64]);
+        let factor_stride = gen.pow(&[2usize.pow(i - 1) as u64]);
         let mut factor = factor_stride;
         for k in 0..poly_size {
             for j in 0..2usize.pow(i - 1) {
@@ -134,7 +136,7 @@ fn fft2_in_place<F: FftField + PrimeField>(
         mem::swap(s1, &mut s2);
     }
 
-    // s1.rotate_right(1);
+    s1.rotate_right(1);
 
     end_timer!(now);
 
@@ -151,6 +153,7 @@ fn fft2_with_rearrange_pad<F: FftField + PrimeField>(
     degree2: bool,
     dom: &Radix2EvaluationDomain<F>,
     pp: &PackedSharingParams<F>,
+    gen: F,
 ) -> Vec<F> {
     // King applies FFT2 with rearrange
 
@@ -180,7 +183,7 @@ fn fft2_with_rearrange_pad<F: FftField + PrimeField>(
         }
         end_timer!(open_shares_timer);
 
-        fft2_in_place(&mut s1, dom, pp); // s1 constains final output now
+        fft2_in_place(&mut s1, dom, pp, gen); // s1 constains final output now
 
         // Optionally double length by padding zeros here
         if pad > 1 {
@@ -220,17 +223,22 @@ fn fft2_with_rearrange_pad<F: FftField + PrimeField>(
     got_from_king
 }
 
+pub fn permute_index(size: usize, index: usize) -> usize {
+    const USIZE_BITS: u32 = 0_usize.count_zeros();
+
+    debug_assert!(index < size);
+    debug_assert!(size.is_power_of_two());
+
+    let bits = size.trailing_zeros();
+    index.reverse_bits().wrapping_shr(USIZE_BITS - bits)
+}
+
 pub fn fft_in_place_rearrange<F: FftField + PrimeField>(data: &mut Vec<F>) {
-    let mut target = 0;
-    for pos in 0..data.len() {
-        if target > pos {
-            data.swap(target, pos)
+    let n = data.len();
+    for i in 0..n {
+        let j = permute_index(n, i);
+        if j > i {
+            data.swap(i, j);
         }
-        let mut mask = data.len() >> 1;
-        while target & mask != 0 {
-            target &= !mask;
-            mask >>= 1;
-        }
-        target |= mask;
     }
 }

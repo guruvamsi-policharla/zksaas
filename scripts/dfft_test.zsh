@@ -10,7 +10,7 @@ BIN=../target/debug/examples/dfft_test
 
 l=2
 t=3
-m=1024
+m=8
 n=8
 
 for n_parties in $n
@@ -33,7 +33,7 @@ do
   
   for pid in ${PROCS[@]}
   do
-    wait $pid
+    wait $pid || { echo "Process $pid exited with an error status"; exit 1; }
   done
 done
 
